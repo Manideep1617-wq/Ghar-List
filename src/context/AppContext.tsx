@@ -827,11 +827,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         if (pError) throw pError;
 
-        // Reload profiles
-        setProfile({ ...profile!, household_id: hData.id, is_host: true });
-      } catch (e) {
+        // Set state
+        setHousehold(hData);
+        const updatedProfile: Profile = {
+          id: user.id,
+          full_name: profile?.full_name || user.user_metadata?.full_name || 'Host',
+          household_id: hData.id,
+          is_host: true
+        };
+        setProfile(updatedProfile);
+        await fetchHouseholdDetails(hData.id);
+        setLoading(false);
+      } catch (e: any) {
         console.error('Error creating household:', e);
         setLoading(false);
+        throw e;
       }
     }
   };
@@ -904,7 +914,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         if (pError) throw pError;
 
-        setProfile({ ...profile!, household_id: hData.id, is_host: false });
+        setHousehold(hData);
+        const updatedProfile: Profile = {
+          id: user.id,
+          full_name: profile?.full_name || user.user_metadata?.full_name || 'Member',
+          household_id: hData.id,
+          is_host: false
+        };
+        setProfile(updatedProfile);
+        await fetchHouseholdDetails(hData.id);
+        setLoading(false);
       } catch (e: any) {
         setLoading(false);
         throw e;
