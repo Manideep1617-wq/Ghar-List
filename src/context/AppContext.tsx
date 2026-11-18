@@ -189,7 +189,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const { data: { subscription } } = supabase.auth.onAuthStateChange(async (_event: any, session: any) => {
       if (session?.user) {
         setUser(session.user);
-        await loadSupabaseProfile(session.user.id);
+        await loadSupabaseProfile(session.user.id, session.user.user_metadata);
       } else {
         setUser(null);
         setProfile(null);
@@ -266,18 +266,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   }, [profile?.household_id]);
 
   // Helper fetchers for Supabase
-  const loadSupabaseProfile = async (uid: string) => {
+  const loadSupabaseProfile = async (uid: string, userMeta?: any) => {
     try {
-      const { data, error } = await supabase
+      let { data, error } = await supabase
         .from('profiles')
         .select('*')
         .eq('id', uid)
-        .single();
-      
-      if (error) throw error;
-      setProfile(data);
+        .maybeSingle();
+
+      if (error && error.code !== 'PGRST116') {
+        console.warn('Profile fetch note:', error);
+      }
+
+      if (!data) {
+        // Auto-provision profile row if not present
+        const fullName = userMeta?.full_name || 'Member';
+        const { data: newProfile, error: insertError } = await supabase
+          .from('profiles')
+          .upsert({ id: uid, full_name: fullName, is_host: false })
+          .select()
+          .maybeSingle();
+
+        if (!insertError && newProfile) {
+          data = newProfile;
+        }
+      }
+
+      if (data) {
+        setProfile(data);
+      }
     } catch (e) {
-      console.error('Error fetching profile:', e);
+      console.error('Error fetching/creating profile:', e);
+    } finally {
       setLoading(false);
     }
   };
@@ -303,10 +323,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   };
 
   const fetchPersonalItems = async () => {
+    if (!user?.id) return;
     const { data } = await supabase
       .from('personal_items')
       .select('*')
-      .eq('user_id', supabase.auth.user?.()?.id || user?.id)
+      .eq('user_id', user.id)
       .order('created_at', { ascending: false });
     if (data) setPersonalItems(data as PersonalItem[]);
   };
@@ -690,19 +711,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           }
         });
         if (error) throw error;
+
+        // If email already exists, Supabase returns empty identities array without throwing
+        if (data.user?.identities && data.user.identities.length === 0) {
+          throw new Error('An account with this email already exists. Please switch to "Sign In" instead.');
+        }
+
+        // If no active session returned (e.g. Supabase requires sign in), attempt direct sign-in
+        if (!data.session) {
+          const { data: signInData, error: signInError } = await supabase.auth.signInWithPassword({
+            email,
+            password
+          });
+          if (signInError) {
+            if (signInError.message.toLowerCase().includes('email not confirmed')) {
+              throw new Error('Email confirmation is active in Supabase. Check your inbox or turn off "Confirm email" in Supabase Dashboard.');
+            }
+            throw signInError;
+          }
+          if (signInData.user) {
+            setUser(signInData.user);
+            await loadSupabaseProfile(signInData.user.id, signInData.user.user_metadata);
+          }
+          return;
+        }
+
         if (data.user) {
           setUser(data.user);
-          // Trigger handles profile insert, but let's wait a moment and poll or load it
-          let count = 0;
-          while (count < 5) {
-            await new Promise(r => setTimeout(r, 500));
-            const { data: pData } = await supabase.from('profiles').select('*').eq('id', data.user.id).single();
-            if (pData) {
-              setProfile(pData);
-              break;
-            }
-            count++;
-          }
+          await loadSupabaseProfile(data.user.id, data.user.user_metadata);
         }
       }
     } finally {
@@ -739,10 +775,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         }, 100);
       } else {
         const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
+        if (error) {
+          if (error.message.toLowerCase().includes('email not confirmed')) {
+            throw new Error('Your email is not confirmed yet. In Supabase Dashboard > Authentication > Users, click "..." next to your email and select "Confirm user", or sign up with a new email.');
+          }
+          throw error;
+        }
         if (data.user) {
           setUser(data.user);
-          await loadSupabaseProfile(data.user.id);
+          await loadSupabaseProfile(data.user.id, data.user.user_metadata);
         }
       }
     } finally {
@@ -819,11 +860,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
         if (hError) throw hError;
 
-        // Update profile
+        // Upsert profile with household association
         const { error: pError } = await supabase
           .from('profiles')
-          .update({ household_id: hData.id, is_host: true })
-          .eq('id', user.id);
+          .upsert({
+            id: user.id,
+            full_name: profile?.full_name || user.user_metadata?.full_name || 'Host',
+            household_id: hData.id,
+            is_host: true
+          });
 
         if (pError) throw pError;
 
@@ -906,11 +951,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           throw new Error('Invalid invite code. Household not found.');
         }
 
-        // Update profile
+        // Upsert profile with joined household
         const { error: pError } = await supabase
           .from('profiles')
-          .update({ household_id: hData.id, is_host: false })
-          .eq('id', user.id);
+          .upsert({
+            id: user.id,
+            full_name: profile?.full_name || user.user_metadata?.full_name || 'Member',
+            household_id: hData.id,
+            is_host: false
+          });
 
         if (pError) throw pError;
 
